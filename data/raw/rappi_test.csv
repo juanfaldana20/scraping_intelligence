@@ -1,0 +1,4 @@
+zona,lat,lng,restaurante,store_id,status,delivery_fee,eta_min,eta_max,descuentos,error
+CDMX Sur (Perisur),19.3046,-99.1842,Mc Donald's - Perisur,1306705688,OPEN,9.9,14,34,Envío Gratis: Aplican TyC; Hasta 44% Off,
+CDMX Santa Fe,19.3604,-99.2569,Mc Donald's - Samara,1306705699,OPEN,9.9,20,35,Envío Gratis: Aplican TyC; Hasta 44% Off,
+GDL Revolución,20.6736,-103.292,McDonald's (Revolución) F,1923209059,OPEN,9.9,12,32,Envío Gratis: Aplican TyC; Hasta 47% Off,
