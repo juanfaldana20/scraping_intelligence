@@ -1,5 +1,5 @@
 """
-Uber Eats MX scraper — extrae delivery fee, ETA y Coca-Cola 500ml de tiendas de conveniencia.
+Uber Eats MX scraper — extrae delivery fee, ETA y precios de productos de referencia.
 
 Flujo por zona:
   1. getFeedV1 (coords en headers) → feedItems[].carousel.stores[]
@@ -8,7 +8,9 @@ Flujo por zona:
      - Promos → signposts[].text
   2. getStoreV1 (storeUuid del paso 1) → detalle + menú
      - Delivery fee → modalityInfo.modalityOptions[DELIVERY] (puede ser None en tiendas)
-     - Coca-Cola 500ml → catalogSectionsMap, buscar "coca" + "500" en título
+     - Coca-Cola 500ml → buscar "coca" + "500" en título
+     - Agua 1L        → buscar "ciel agua natural", "ciel", "agua 1l", etc.
+     - Leche Lala 1L  → buscar "leche lala 1l", "leche lala", "lala 1l", etc.
 
 NOTA: la cookie uev2.loc lleva hardcoded una ubicación CDMX. Las 21 zonas mandan
 headers diferentes pero pueden retornar la misma tienda si la cookie domina.
@@ -44,7 +46,8 @@ FEED_BODY = {
 COLS = [
     "zona_id", "city", "zone_type", "lat", "lng", "plataforma",
     "restaurante", "delivery_fee", "eta_min", "eta_max",
-    "product_price", "product_available", "product_name",
+    "coca_price", "coca_available", "coca_name",
+    "agua_price", "agua_available", "agua_name",
     "descuentos", "timestamp", "error",
 ]
 
@@ -136,27 +139,66 @@ def _parse_delivery_fee(data):
     return None
 
 
-def _find_coca_cola_500(data):
-    """Busca Coca-Cola 500ml en el menú del store."""
-    # Primero buscar todos los items con "coca" en el título
-    items = _find_items_by_keyword(data, "coca")
+def _cheapest(items):
+    """Devuelve (price_mxn, title) del item más barato de la lista."""
+    it = min(items, key=lambda x: x.get("price", 999_999_99))
+    return round(it["price"] / 100, 2), _item_title(it)
 
+
+def _find_coca_cola(data):
+    """Busca Coca-Cola 500ml en el menú del store."""
+    items = _find_items_by_keyword(data, "coca")
     if not items:
         return None, False, None
 
-    # Filtrar los que tengan "500" en el título (500ml)
     coca_500 = [it for it in items if "500" in _item_title(it).lower()]
     if coca_500:
-        cheapest = min(coca_500, key=lambda x: x.get("price", 999_999_99))
-        title = _item_title(cheapest)
-        price = round(cheapest["price"] / 100, 2)
+        price, title = _cheapest(coca_500)
         return price, True, title
 
-    # Si no hay 500ml específico, tomar la Coca-Cola más barata disponible
-    cheapest = min(items, key=lambda x: x.get("price", 999_999_99))
-    title = _item_title(cheapest)
-    price = round(cheapest["price"] / 100, 2)
+    # Sin 500ml exacto: tomar la más barata disponible
+    price, title = _cheapest(items)
     return price, True, f"{title} (no 500ml exacto)"
+
+
+def _find_agua_1l(data):
+    """Busca Agua 1L en el menú del store (Ciel, agua natural, agua purificada)."""
+    # Términos específicos en orden de preferencia
+    for term in ["ciel agua natural", "ciel", "agua 1l", "agua natural 1l", "agua purificada 1l", "agua 1 litro"]:
+        items = _find_items_by_keyword(data, term)
+        if items:
+            price, title = _cheapest(items)
+            return price, True, title
+
+    # Fallback: cualquier "agua" que contenga "1" en el título (1L, 1lt, 1.0l…)
+    items = _find_items_by_keyword(data, "agua")
+    agua_1 = [
+        it for it in items
+        if any(tok in _item_title(it).lower() for tok in ["1l", "1 l", "1lt", "1 litro", "1.0"])
+    ]
+    if agua_1:
+        price, title = _cheapest(agua_1)
+        return price, True, title
+
+    return None, False, None
+
+
+def _find_leche_lala(data):
+    """Busca Leche Lala 1L en el menú del store (brand-first: "Lala Entera", etc.)."""
+    for term in ["lala entera 1l", "lala entera", "lala 1l", "leche lala 1l", "leche lala", "lala"]:
+        items = _find_items_by_keyword(data, term)
+        if items:
+            # Si hay múltiples Lala, preferir la de 1L
+            lala_1l = [it for it in items if any(
+                tok in _item_title(it).lower() for tok in ["1l", "1 l", "1lt", "1 litro"]
+            )]
+            if lala_1l:
+                price, title = _cheapest(lala_1l)
+            else:
+                price, title = _cheapest(items)
+            return price, True, title
+
+    return None, False, None
 
 
 def _parse_discounts(store):
@@ -278,13 +320,17 @@ def _get_store_detail(zone, store_uuid):
     if not data:
         return {"error": "getStoreV1 returned empty data"}
 
-    product_price, product_available, product_title = _find_coca_cola_500(data)
+    coca_price, coca_available, coca_title = _find_coca_cola(data)
+    agua_price, agua_available, agua_title = _find_agua_1l(data)
 
     return {
-        "delivery_fee":      _parse_delivery_fee(data),
-        "product_price":     product_price,
-        "product_available": product_available,
-        "product_name":      product_title,
+        "delivery_fee":   _parse_delivery_fee(data),
+        "coca_price":     coca_price,
+        "coca_available": coca_available,
+        "coca_name":      coca_title,
+        "agua_price":     agua_price,
+        "agua_available": agua_available,
+        "agua_name":      agua_title,
     }
 
 
@@ -309,13 +355,17 @@ def scrape_zone(zone):
                     descuentos=feed.get("descuentos"),
                     error=detail["error"])
 
-    product_name = detail.get("product_name")
+    coca_available = detail.get("coca_available", False)
     match_type = feed.get("match_type", "")
     store_name = feed.get("restaurante", "N/A")
-    if product_name:
-        product_name = f"{product_name} @ {store_name} ({match_type})"
+    coca_name = detail.get("coca_name")
+    if coca_name:
+        coca_name = f"{coca_name} @ {store_name} ({match_type})"
     else:
-        product_name = f"Coca-Cola 500ml (no encontrada en menú) @ {store_name} ({match_type})"
+        coca_name = f"Coca-Cola 500ml (no encontrada) @ {store_name} ({match_type})"
+
+    print(f"  coca={'✓' if coca_available else '✗'} "
+          f"agua={'✓' if detail.get('agua_available') else '✗'}")
 
     return _row(zone, ts,
                 restaurante=feed.get("restaurante"),
@@ -323,38 +373,45 @@ def scrape_zone(zone):
                 eta_max=feed.get("eta_max"),
                 descuentos=feed.get("descuentos"),
                 delivery_fee=detail.get("delivery_fee"),
-                product_price=detail.get("product_price"),
-                product_available=detail.get("product_available", False),
-                product_name=product_name)
+                coca_price=detail.get("coca_price"),
+                coca_available=coca_available,
+                coca_name=coca_name,
+                agua_price=detail.get("agua_price"),
+                agua_available=detail.get("agua_available", False),
+                agua_name=detail.get("agua_name"))
 
 
 def _row(zone, ts, *, restaurante=None, delivery_fee=None,
          eta_min=None, eta_max=None,
-         product_price=None, product_available=False, product_name=None,
+         coca_price=None, coca_available=False, coca_name=None,
+         agua_price=None, agua_available=False, agua_name=None,
          descuentos=None, error=None):
     return {
-        "zona_id":           zone["id"],
-        "city":              zone["city"],
-        "zone_type":         zone["type"],
-        "lat":               zone["lat"],
-        "lng":               zone["lng"],
-        "plataforma":        "uber_eats",
-        "restaurante":       restaurante,
-        "delivery_fee":      delivery_fee,
-        "eta_min":           eta_min,
-        "eta_max":           eta_max,
-        "product_price":     product_price,
-        "product_available": product_available,
-        "product_name":      product_name,
-        "descuentos":        descuentos,
-        "timestamp":         ts,
-        "error":             error,
+        "zona_id":        zone["id"],
+        "city":           zone["city"],
+        "zone_type":      zone["type"],
+        "lat":            zone["lat"],
+        "lng":            zone["lng"],
+        "plataforma":     "uber_eats",
+        "restaurante":    restaurante,
+        "delivery_fee":   delivery_fee,
+        "eta_min":        eta_min,
+        "eta_max":        eta_max,
+        "coca_price":     coca_price,
+        "coca_available": coca_available,
+        "coca_name":      coca_name,
+        "agua_price":     agua_price,
+        "agua_available": agua_available,
+        "agua_name":      agua_name,
+        "descuentos":     descuentos,
+        "timestamp":      ts,
+        "error":          error,
     }
 
 
 # ── entry points ──────────────────────────────────────────────────────────────
 
-def run(out_path="data/raw/ubereats_full.csv"):
+def run(out_path="data/raw/ubereats_v2.csv"):
     rows = []
     for zone in ZONES:
         print(f"\n[uber_eats] {zone['id']} ({zone['city']} / {zone['type']})")

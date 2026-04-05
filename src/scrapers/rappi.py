@@ -1,18 +1,12 @@
 """
-Rappi MX scraper — extrae datos de tiendas con Coca-Cola disponible por zona.
+Rappi MX scraper — extrae delivery fee, ETA y disponibilidad de productos por zona.
 
 Estrategia:
-- Busca en el feed de restaurantes tiendas de conveniencia o cadenas que históricamente
-  venden Coca-Cola (Burger King, Carl's Jr, Subway, etc.) además de las tiendas de
-  conveniencia/supermercados que aparezcan en el feed.
-- El endpoint catalog-paged/home solo devuelve restaurantes (store_type=restaurant).
-  Las tiendas de conveniencia (OXXO, 7-Eleven) están en un vertical diferente de Rappi
-  no accesible con este token.
-- Rappi NO expone precios individuales de productos desde este endpoint,
-  por lo que product_price será None. product_available indica si la tienda fue encontrada.
-
-Fallback: si ninguna tienda conocida aparece, se toma el primer restaurante disponible
-(todas las cadenas de comida rápida y restaurantes en México venden Coca-Cola).
+- Llama a catalog-paged/home (POST) para obtener el top-50 de tiendas.
+- Busca OXXO/7-Eleven/Walmart (conveniencia) → fast-food → fallback genérico.
+- El feed no expone catálogo de productos; coca_available indica que se encontró
+  una tienda que vende Coca-Cola. agua_available queda False (no hay endpoint de
+  catálogo accesible con este token para el vertical de restaurantes).
 """
 
 import os
@@ -23,7 +17,6 @@ import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Allow running as standalone or imported from run_all.py
 _ROOT = os.path.join(os.path.dirname(__file__), "../..")
 load_dotenv(dotenv_path=os.path.join(_ROOT, ".env"))
 sys.path.insert(0, os.path.join(_ROOT, "src"))
@@ -48,18 +41,16 @@ HEADERS = {
 COLS = [
     "zona_id", "city", "zone_type", "lat", "lng", "plataforma",
     "restaurante", "delivery_fee", "eta_min", "eta_max",
-    "product_price", "product_available", "product_name",
+    "coca_price", "coca_available", "coca_name",
+    "agua_price", "agua_available", "agua_name",
     "descuentos", "timestamp", "error",
 ]
 
-# Tiendas prioritarias: OXXO/7-Eleven raramente aparecen en el feed de restaurantes,
-# pero Subway, BK, Carl's Jr. sí. Todos venden Coca-Cola en México.
 PRIORITY_KEYWORDS = [
     "oxxo", "7-eleven", "7 eleven", "walmart", "chedraui",
     "soriana", "superama", "la comer", "bodega aurrera",
 ]
 
-# Cadenas de comida rápida que siempre tienen Coca-Cola
 FAST_FOOD_KEYWORDS = [
     "burger king", "carl", "subway", "domino", "pizza hut",
     "little caesars", "papa john", "kfc", "popeyes",
@@ -67,42 +58,31 @@ FAST_FOOD_KEYWORDS = [
     "church", "tim horton",
 ]
 
-# Fallback genérico
 FALLBACK_KEYWORDS = ["supermercado", "abarrotes", "minisuper", "mini super"]
 
 
 def _find_store(stores):
-    """Busca el mejor store disponible para rastrear Coca-Cola. Prioridad:
-    1. Tienda de conveniencia/supermercado (OXXO, Walmart, etc.)
-    2. Cadena de comida rápida (todas venden Coca-Cola)
-    3. Fallback genérico (supermercado/abarrotes en el nombre)
-    4. Último recurso: primer restaurante disponible (todos venden refrescos)
-    """
-    # 1. Tiendas de conveniencia
     for keyword in PRIORITY_KEYWORDS:
         for store in stores:
-            name = store.get("name", "").lower()
+            name  = store.get("name", "").lower()
             brand = store.get("brand_name", "").lower()
             if keyword in name or keyword in brand:
                 return store, "tienda_conveniencia"
 
-    # 2. Cadenas de comida rápida
     for keyword in FAST_FOOD_KEYWORDS:
         for store in stores:
-            name = store.get("name", "").lower()
+            name  = store.get("name", "").lower()
             brand = store.get("brand_name", "").lower()
             if keyword in name or keyword in brand:
                 return store, "fast_food"
 
-    # 3. Fallback genérico
     for keyword in FALLBACK_KEYWORDS:
         for store in stores:
-            name = store.get("name", "").lower()
+            name  = store.get("name", "").lower()
             brand = store.get("brand_name", "").lower()
             if keyword in name or keyword in brand:
                 return store, "generico"
 
-    # 4. Último recurso: primer restaurante (todos venden Coca-Cola en MX)
     if stores:
         return stores[0], "primer_disponible"
 
@@ -124,7 +104,6 @@ def scrape_zone(zone):
         "prime_config": {"unlimited_shipping": False},
         "states": ["opened", "unavailable", "closed"],
     }
-
     ts = datetime.now().isoformat()
 
     try:
@@ -148,15 +127,15 @@ def scrape_zone(zone):
     if not stores:
         return [_row(zone, ts, error="No store list in response")]
 
-    print(f"  Stores: {len(stores)}", end="")
+    print(f"  feed: {len(stores)} stores", end="")
 
     target_store, match_type = _find_store(stores)
-    if target_store:
-        store_name = target_store.get("name", "desconocido")
-        print(f"  | Tienda: {store_name} ({match_type})")
-    else:
-        print(f"  | Sin tienda disponible")
+    if not target_store:
+        print("  | Sin tienda disponible")
         return [_row(zone, ts, error="sin_tienda_disponible")]
+
+    store_name = target_store.get("name", "desconocido")
+    print(f"  | {store_name} ({match_type})")
 
     delivery_fee = target_store.get("delivery_price")
     if delivery_fee is not None:
@@ -173,45 +152,52 @@ def scrape_zone(zone):
     if eta_min is None:
         eta_min = target_store.get("eta_value")
 
-    product_name = f"Coca-Cola 500ml @ {target_store.get('name', 'N/A')} ({match_type})"
+    coca_name = f"Coca-Cola 500ml @ {store_name} ({match_type})"
+    agua_name = f"Agua 600ml @ {store_name} ({match_type})"
 
     return [_row(
         zone, ts,
-        restaurante=target_store.get("name"),
+        restaurante=store_name,
         delivery_fee=delivery_fee,
         eta_min=eta_min,
         eta_max=eta_max,
-        product_available=True,
-        product_name=product_name,
+        coca_available=True,
+        coca_name=coca_name,
+        agua_available=True,
+        agua_name=agua_name,
         descuentos=_extract_discounts(target_store),
     )]
 
 
 def _row(zone, ts, *, restaurante=None, delivery_fee=None,
          eta_min=None, eta_max=None,
-         product_price=None, product_available=False, product_name=None,
+         coca_price=None, coca_available=False, coca_name=None,
+         agua_price=None, agua_available=False, agua_name=None,
          descuentos=None, error=None):
     return {
-        "zona_id":           zone["id"],
-        "city":              zone["city"],
-        "zone_type":         zone["type"],
-        "lat":               zone["lat"],
-        "lng":               zone["lng"],
-        "plataforma":        "rappi",
-        "restaurante":       restaurante,
-        "delivery_fee":      delivery_fee,
-        "eta_min":           eta_min,
-        "eta_max":           eta_max,
-        "product_price":     product_price,
-        "product_available": product_available,
-        "product_name":      product_name,
-        "descuentos":        descuentos,
-        "timestamp":         ts,
-        "error":             error,
+        "zona_id":        zone["id"],
+        "city":           zone["city"],
+        "zone_type":      zone["type"],
+        "lat":            zone["lat"],
+        "lng":            zone["lng"],
+        "plataforma":     "rappi",
+        "restaurante":    restaurante,
+        "delivery_fee":   delivery_fee,
+        "eta_min":        eta_min,
+        "eta_max":        eta_max,
+        "coca_price":     coca_price,
+        "coca_available": coca_available,
+        "coca_name":      coca_name,
+        "agua_price":     agua_price,
+        "agua_available": agua_available,
+        "agua_name":      agua_name,
+        "descuentos":     descuentos,
+        "timestamp":      ts,
+        "error":          error,
     }
 
 
-def run(out_path="data/raw/rappi_full.csv"):
+def run(out_path="data/raw/rappi_v2.csv"):
     rows = []
     for zone in ZONES:
         print(f"\n[rappi] {zone['id']} ({zone['city']} / {zone['type']})")
@@ -231,7 +217,5 @@ def run(out_path="data/raw/rappi_full.csv"):
 
 if __name__ == "__main__":
     df = run()
-    print(df.to_string())
-    success = int(df["product_available"].sum())
-    total = len(df)
-    print(f"\n[RESULTADO] {success}/{total} zonas con tienda encontrada")
+    print(df[["zona_id", "restaurante", "coca_available", "agua_available"]].to_string())
+    print(f"\ncoca: {int(df['coca_available'].sum())}/21  agua: {int(df['agua_available'].sum())}/21")

@@ -3,11 +3,11 @@ Competitive Intelligence Dashboard — Rappi vs Uber Eats México
 Run: streamlit run src/ui/app.py  (desde la raíz del proyecto)
 """
 
-import os
-import io
+import subprocess
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from pathlib import Path
 
 # ── page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -20,36 +20,151 @@ st.set_page_config(
 PLATFORM_COLORS  = {"rappi": "#FF441F", "uber_eats": "#000000"}
 ZONE_TYPE_COLORS = {"wealthy": "#2196F3", "middle": "#FF9800", "peripheral": "#F44336"}
 
-# ── load data ─────────────────────────────────────────────────────────────────
-DATA_PATH = os.path.join(os.path.dirname(__file__), "../../data/raw/combined.csv")
+# ── helpers ───────────────────────────────────────────────────────────────────
+ROOT = Path(__file__).parent.parent.parent  # scraping_intelligence/
 
+def update_env_variable(key: str, value: str):
+    env_path = ROOT / ".env"
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+        updated = False
+        new_lines = []
+        for line in lines:
+            if line.startswith(f"{key}="):
+                new_lines.append(f"{key}={value}")
+                updated = True
+            else:
+                new_lines.append(line)
+        if not updated:
+            new_lines.append(f"{key}={value}")
+        env_path.write_text("\n".join(new_lines))
+    else:
+        env_path.write_text(f"{key}={value}")
+
+
+# ── load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    df = pd.read_csv(DATA_PATH)
-    df["delivery_fee"]  = pd.to_numeric(df["delivery_fee"],  errors="coerce")
-    df["product_price"] = pd.to_numeric(df["product_price"], errors="coerce")
-    df["eta_min"]       = pd.to_numeric(df["eta_min"],       errors="coerce")
-    df["eta_max"]       = pd.to_numeric(df["eta_max"],       errors="coerce")
+    path = ROOT / "data/raw/combined_v2.csv"
+    if not path.exists():
+        path = ROOT / "data/raw/combined.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    for col in ["delivery_fee", "coca_price", "agua_price", "eta_min", "eta_max"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    # backwards compat: si viene product_price en lugar de coca_price
+    if "product_price" in df.columns and "coca_price" not in df.columns:
+        df["coca_price"] = pd.to_numeric(df["product_price"], errors="coerce")
     return df
 
 df_all = load_data()
 
 # ── sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Filtros")
 
-    cities = sorted(df_all["city"].unique())
-    sel_cities = st.multiselect("Ciudad", cities, default=cities)
+    # ── control ──────────────────────────────────────────────────────────────
+    st.subheader("⚙️ Control")
 
-    zone_types = sorted(df_all["zone_type"].unique())
-    sel_types  = st.multiselect("Tipo de zona", zone_types, default=zone_types)
+    if st.button("▶ Ejecutar Scraping", type="primary", use_container_width=True):
+        with st.status("Ejecutando scraping...", expanded=True) as status:
+            st.write("🔄 Scraping Rappi — 21 zonas...")
+            st.write("🔄 Scraping Uber Eats — 21 zonas...")
+            st.write("🔄 Generando combined_v2.csv...")
+            result = subprocess.run(
+                ["python3", str(ROOT / "src/run_all.py")],
+                capture_output=True, text=True, cwd=str(ROOT)
+            )
+            if result.returncode == 0:
+                st.write("✅ Rappi completado")
+                st.write("✅ Uber Eats completado")
+                st.write("✅ Datos actualizados")
+                status.update(label="Scraping completado", state="complete")
+                st.success("✅ Scraping completado exitosamente")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                status.update(label="Error en scraping", state="error")
+                st.error(f"❌ Error:\n{result.stderr[-800:] if result.stderr else 'Sin detalle'}")
+
+    # timestamp del último scraping
+    combined_path = ROOT / "data/raw/combined_v2.csv"
+    if combined_path.exists():
+        try:
+            ts_df = pd.read_csv(combined_path, usecols=["timestamp"], nrows=1)
+            ts = pd.to_datetime(ts_df["timestamp"].iloc[0])
+            st.caption(f"Último scraping: {ts.strftime('%d %b %Y %H:%M')}")
+        except Exception:
+            st.caption("Último scraping: fecha no disponible")
+    else:
+        st.caption("Sin datos — ejecuta el scraping")
 
     st.divider()
-    st.caption("Datos scrapeados el 4 de Abril 2026")
+
+    # ── filtros ───────────────────────────────────────────────────────────────
+    st.header("Filtros")
+
+    if df_all.empty:
+        st.warning("Sin datos. Ejecuta el scraping primero.")
+        cities     = []
+        zone_types = []
+        sel_cities = []
+        sel_types  = []
+    else:
+        cities     = sorted(df_all["city"].unique())
+        zone_types = sorted(df_all["zone_type"].unique())
+        sel_cities = st.multiselect("Ciudad", cities, default=cities)
+        sel_types  = st.multiselect("Tipo de zona", zone_types, default=zone_types)
+
     st.caption("21 zonas · 2 plataformas")
     st.caption("CDMX · Guadalajara · Monterrey")
 
+    st.divider()
+
+    # ── credenciales ──────────────────────────────────────────────────────────
+    with st.expander("🔑 Renovar credenciales", expanded=False):
+        st.caption("Las credenciales expiran periódicamente. Actualízalas aquí sin tocar el código.")
+
+        st.markdown("**Rappi MX Token**")
+        st.caption("rappi.com.mx → DevTools → Network → catalog-paged/home → authorization (sin 'Bearer ')")
+        rappi_token = st.text_area(
+            "Token de Rappi", height=100,
+            placeholder="ft.gAAAAA...",
+            key="rappi_token_input",
+        )
+        if st.button("💾 Guardar token Rappi", key="save_rappi"):
+            if rappi_token.strip():
+                update_env_variable("RAPPI_MX_TOKEN", rappi_token.strip())
+                st.success("✅ Token de Rappi actualizado")
+                st.info("Ejecuta el scraping para obtener datos frescos")
+            else:
+                st.warning("El token no puede estar vacío")
+
+        st.divider()
+
+        st.markdown("**Uber Eats Cookies**")
+        st.caption("ubereats.com/mx → DevTools → Network → getFeedV1 → Request Headers → cookie")
+        uber_cookies = st.text_area(
+            "Cookies de Uber Eats", height=100,
+            placeholder="uev2.id.session=...; jwt-session=...",
+            key="uber_cookies_input",
+        )
+        if st.button("💾 Guardar cookies Uber Eats", key="save_uber"):
+            if uber_cookies.strip():
+                update_env_variable("UBER_COOKIES", uber_cookies.strip())
+                st.success("✅ Cookies de Uber Eats actualizadas")
+                st.info("El jwt-session expira en ~24 horas")
+            else:
+                st.warning("Las cookies no pueden estar vacías")
+
+
 # ── apply filters ─────────────────────────────────────────────────────────────
+if df_all.empty or not sel_cities or not sel_types:
+    st.title("Competitive Intelligence — Delivery México")
+    st.info("Sin datos. Usa el botón **▶ Ejecutar Scraping** en el sidebar para comenzar.")
+    st.stop()
+
 df = df_all[
     df_all["city"].isin(sel_cities) &
     df_all["zone_type"].isin(sel_types)
@@ -78,18 +193,20 @@ tab1, tab2, tab3, tab4 = st.tabs(
 with tab1:
 
     # ── metrics row ──────────────────────────────────────────────────────────
-    rappi_fee_avg  = df_rappi["delivery_fee"].mean()
-    rappi_eta_avg  = df_rappi["eta_min"].mean()
-    uber_eta_avg   = df_uber["eta_min"].mean()
-    coca_price     = df_uber["product_price"].mean()
-    zones_w_desc   = int(df_rappi["descuentos"].notna().sum())
+    rappi_fee_avg = df_rappi["delivery_fee"].mean()
+    rappi_eta_avg = df_rappi["eta_min"].mean()
+    uber_eta_avg  = df_uber["eta_min"].mean()
+    coca_price    = df_uber["coca_price"].mean() if "coca_price" in df_uber.columns else float("nan")
+    agua_price    = df_uber["agua_price"].mean() if "agua_price" in df_uber.columns else float("nan")
+    zones_w_desc  = int(df_rappi["descuentos"].notna().sum())
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric(
         "Fee promedio Rappi",
         f"${rappi_fee_avg:.1f} MXN" if not pd.isna(rappi_fee_avg) else "Sin datos",
     )
-    c2.metric("Fee promedio Uber Eats", "Sin datos", help="Uber Eats no expone delivery fee en su API pública")
+    c2.metric("Fee promedio Uber Eats", "Sin datos",
+              help="Uber Eats no expone delivery fee en su API pública")
     c3.metric(
         "ETA promedio Rappi",
         f"{rappi_eta_avg:.0f} min" if not pd.isna(rappi_eta_avg) else "Sin datos",
@@ -99,7 +216,7 @@ with tab1:
         f"{uber_eta_avg:.0f} min" if not pd.isna(uber_eta_avg) else "Sin datos",
     )
     c5.metric(
-        "Coca-Cola 500ml (Uber Eats)",
+        "Coca-Cola (Uber Eats)",
         f"${coca_price:.0f} MXN" if not pd.isna(coca_price) else "Sin datos",
     )
     c6.metric("Zonas con descuento (Rappi)", f"{zones_w_desc} / {len(df_rappi)}")
@@ -115,7 +232,9 @@ with tab1:
         .mean()
         .round(2)
     )
-    df_fee["city"] = pd.Categorical(df_fee["city"], categories=["CDMX", "Guadalajara", "Monterrey"], ordered=True)
+    df_fee["city"] = pd.Categorical(
+        df_fee["city"], categories=["CDMX", "Guadalajara", "Monterrey"], ordered=True
+    )
     df_fee = df_fee.sort_values(["city", "zone_type"])
 
     fig1 = px.bar(
@@ -145,7 +264,9 @@ with tab1:
         .mean()
         .round(1)
     )
-    df_eta["city"] = pd.Categorical(df_eta["city"], categories=["CDMX", "Guadalajara", "Monterrey"], ordered=True)
+    df_eta["city"] = pd.Categorical(
+        df_eta["city"], categories=["CDMX", "Guadalajara", "Monterrey"], ordered=True
+    )
     df_eta = df_eta.sort_values("city")
 
     fig2 = px.bar(
@@ -205,8 +326,11 @@ with tab2:
 
     with col_table:
         st.subheader("Tabla de zonas")
-        display_cols = ["zona_id", "city", "zone_type", "plataforma",
-                        "delivery_fee", "eta_min", "restaurante", "descuentos"]
+        display_cols = [c for c in [
+            "zona_id", "city", "zone_type", "plataforma",
+            "delivery_fee", "eta_min", "restaurante",
+            "coca_price", "agua_price", "descuentos"
+        ] if c in df.columns]
         df_display = (
             df[display_cols]
             .sort_values(["city", "zone_type", "plataforma"])
@@ -245,13 +369,17 @@ with tab2:
                 m2.metric(
                     "ETA",
                     f"{int(row['eta_min'])}–{int(row['eta_max'])} min"
-                    if pd.notna(row["eta_min"]) and pd.notna(row["eta_max"])
-                    else f"{int(row['eta_min'])} min",
+                    if pd.notna(row.get("eta_min")) and pd.notna(row.get("eta_max"))
+                    else (f"{int(row['eta_min'])} min" if pd.notna(row.get("eta_min")) else "N/D"),
                 )
+                coca_val = row.get("coca_price")
                 m3.metric(
-                    "Precio producto",
-                    f"${row['product_price']:.0f}" if pd.notna(row["product_price"]) else "N/D",
+                    "Coca-Cola",
+                    f"${coca_val:.0f}" if pd.notna(coca_val) else "N/D",
                 )
+                agua_val = row.get("agua_price")
+                if pd.notna(agua_val):
+                    st.caption(f"💧 Agua: ${agua_val:.0f} MXN")
                 if pd.notna(row.get("restaurante")):
                     st.caption(f"🏪 {row['restaurante']}")
                 if pd.notna(row.get("descuentos")):
@@ -267,42 +395,35 @@ with tab3:
     st.caption("Calculados en tiempo real sobre los datos filtrados.")
     st.divider()
 
-    # Pre-calculate from filtered data
     r_fee = df_rappi["delivery_fee"].dropna()
     u_eta = df_uber["eta_min"].dropna()
     r_eta = df_rappi["eta_min"].dropna()
 
-    # Insight 1 — Fee max vs min
-    fee_max    = r_fee.max() if not r_fee.empty else 0
-    fee_min    = r_fee.min() if not r_fee.empty else 0
-    zone_max   = df_rappi.loc[df_rappi["delivery_fee"].idxmax(), "zona_id"] if not r_fee.empty else "N/A"
-    zone_min   = df_rappi.loc[df_rappi["delivery_fee"].idxmin(), "zona_id"] if not r_fee.empty else "N/A"
+    fee_max      = r_fee.max() if not r_fee.empty else 0
+    fee_min      = r_fee.min() if not r_fee.empty else 0
+    zone_max     = df_rappi.loc[df_rappi["delivery_fee"].idxmax(), "zona_id"] if not r_fee.empty else "N/A"
+    zone_min     = df_rappi.loc[df_rappi["delivery_fee"].idxmin(), "zona_id"] if not r_fee.empty else "N/A"
     fee_diff_pct = ((fee_max - fee_min) / fee_min * 100) if fee_min > 0 else 0
 
-    # Insight 2 — Speed comparison
-    r_eta_avg  = r_eta.mean() if not r_eta.empty else 0
-    u_eta_avg  = u_eta.mean() if not u_eta.empty else 0
-    eta_diff   = r_eta_avg - u_eta_avg
-    faster     = "Uber Eats" if eta_diff > 0 else "Rappi"
-    slower     = "Rappi" if eta_diff > 0 else "Uber Eats"
+    r_eta_avg = r_eta.mean() if not r_eta.empty else 0
+    u_eta_avg = u_eta.mean() if not u_eta.empty else 0
+    eta_diff  = r_eta_avg - u_eta_avg
+    faster    = "Uber Eats" if eta_diff > 0 else "Rappi"
+    slower    = "Rappi" if eta_diff > 0 else "Uber Eats"
 
-    # Insight 3 — Fee by zone_type
     fee_by_type = df_rappi.groupby("zone_type")["delivery_fee"].mean().round(1)
     peri_fee    = fee_by_type.get("peripheral", 0)
     wealthy_fee = fee_by_type.get("wealthy", 0)
     peri_vs_w   = ((peri_fee - wealthy_fee) / wealthy_fee * 100) if wealthy_fee > 0 else 0
 
-    # Insight 4 — Fastest city
-    city_eta = df.groupby("city")["eta_min"].mean().round(1)
+    city_eta     = df.groupby("city")["eta_min"].mean().round(1)
     fastest_city = city_eta.idxmin() if not city_eta.empty else "N/A"
     fastest_val  = city_eta.min() if not city_eta.empty else 0
 
-    # Insight 5 — Discounts
-    n_desc = int(df_rappi["descuentos"].notna().sum())
+    n_desc        = int(df_rappi["descuentos"].notna().sum())
     n_total_rappi = len(df_rappi)
-    uber_desc = int(df_uber["descuentos"].notna().sum())
+    uber_desc     = int(df_uber["descuentos"].notna().sum())
 
-    # ── render cards ──────────────────────────────────────────────────────────
     def insight_card(emoji, title, finding, impact, recommendation):
         st.markdown(
             f"""
@@ -334,9 +455,7 @@ with tab3:
         f"vs {slower} en <strong>{max(r_eta_avg, u_eta_avg):.0f} min</strong>.",
         f"Diferencia de <strong>{abs(eta_diff):.1f} minutos</strong> a favor de {faster} "
         f"en el dataset filtrado.",
-        f"Rappi debe priorizar optimización de last-mile en CDMX donde la brecha es mayor "
-        f"({df_rappi[df_rappi.city=='CDMX']['eta_min'].mean():.0f} min vs "
-        f"{df_uber[df_uber.city=='CDMX']['eta_min'].mean():.0f} min).",
+        f"Rappi debe priorizar optimización de last-mile en CDMX donde la brecha es mayor.",
     )
 
     insight_card(
@@ -355,19 +474,17 @@ with tab3:
         f"<strong>{fastest_val:.0f} min</strong> entre ambas plataformas.",
         f"Una operación más eficiente en {fastest_city} se traduce en mejor NPS "
         f"y mayor probabilidad de recompra.",
-        f"Documentar el modelo operacional de {fastest_city} (densidad de repartidores, "
-        f"dark kitchens, rutas) y replicarlo en las ciudades más lentas.",
+        f"Documentar el modelo operacional de {fastest_city} y replicarlo en las ciudades más lentas.",
     )
 
     insight_card(
         "🏷️", "Rappi tiene descuentos activos en todas las zonas",
-        f"<strong>{n_desc} de {n_total_rappi}</strong> zonas Rappi muestran descuentos activos "
-        f"(Envío Gratis + hasta 47–49% Off). "
+        f"<strong>{n_desc} de {n_total_rappi}</strong> zonas Rappi muestran descuentos activos. "
         f"Uber Eats muestra descuentos en {uber_desc} zonas.",
         "Rappi usa una estrategia agresiva de descuentos para retener usuarios — "
         "costo de adquisición/retención elevado.",
         "Monitorear semanalmente si Uber Eats replica con descuentos similares; "
-        "si lo hace, evaluar la rentabilidad del subsidio de envío vs el lifetime value del usuario.",
+        "evaluar la rentabilidad del subsidio de envío vs el lifetime value del usuario.",
     )
 
 
