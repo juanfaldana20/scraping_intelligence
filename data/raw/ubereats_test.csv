@@ -1,0 +1,4 @@
+zona,lat,lng,restaurante,delivery_fee,eta_min,eta_max,big_mac_price,descuentos,error
+CDMX Polanco,19.4326,-99.195,McDonald's Paseo Acoxpa,0.0,22,40,125.0,Ahorros exclusivos,
+CDMX Roma Norte,19.4195,-99.1575,McDonald's Paseo Acoxpa,0.0,22,40,125.0,Ahorros exclusivos,
+GDL Chapultepec,20.6736,-103.382,McDonald's Paseo Acoxpa,0.0,22,40,125.0,Ahorros exclusivos,
